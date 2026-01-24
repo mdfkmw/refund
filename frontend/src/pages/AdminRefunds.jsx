@@ -62,6 +62,27 @@ export default function AdminRefunds() {
     return refunds.filter((item) => item?.refund?.status === filter);
   }, [refunds, filter]);
 
+  const formatSeatLabels = (reservations) => {
+    const labels = (reservations || [])
+      .map((resv) => resv?.seat_label)
+      .filter((value) => value && String(value).trim());
+    if (!labels.length) return '—';
+    return labels.join(', ');
+  };
+
+  const formatSegments = (reservations) => {
+    const segments = (reservations || [])
+      .map((resv) => {
+        const board = resv?.board_name ? String(resv.board_name).trim() : '';
+        const exit = resv?.exit_name ? String(resv.exit_name).trim() : '';
+        if (!board && !exit) return null;
+        return `${board || '—'} → ${exit || '—'}`;
+      })
+      .filter(Boolean);
+    if (!segments.length) return '—';
+    return segments.join(', ');
+  };
+
   const handleMarkSuccess = async (refundId) => {
     if (!refundId) return;
     if (!window.confirm('Ești sigur că vrei să marchezi acest refund ca reușit?')) return;
@@ -131,9 +152,8 @@ export default function AdminRefunds() {
             const order = item?.order || {};
             const paymentPublic = item?.payment_public || {};
             const reservations = Array.isArray(item?.reservations) ? item.reservations : [];
-            const payloadPreview = refund.provider_payload
-              ? refund.provider_payload
-              : null;
+            const seatLabelText = formatSeatLabels(reservations);
+            const segmentText = formatSegments(reservations);
 
             return (
               <div key={refund.id} className="border rounded-lg bg-white p-4 shadow-sm space-y-3">
@@ -172,6 +192,8 @@ export default function AdminRefunds() {
                     <div>Email: {order.customer_email || '—'}</div>
                     <div>Rută: {order.route_name || '—'}</div>
                     <div>Plecare: {order.trip_date || '—'} {order.trip_time || ''}</div>
+                    <div>Loc: {seatLabelText}</div>
+                    <div>Secțiune: {segmentText}</div>
                   </div>
 
                   <div className="space-y-1">
@@ -189,31 +211,6 @@ export default function AdminRefunds() {
                     <div>Procesat la: {formatDateTime(refund.processed_at)}</div>
                     <div>Reason: {refund.reason || '—'}</div>
                   </div>
-                </div>
-
-                <div className="border-t pt-3 space-y-2">
-                  <div className="text-sm font-semibold text-gray-800">Detalii rezervări</div>
-                  {reservations.length === 0 ? (
-                    <div className="text-sm text-gray-500">Nu există rezervări asociate.</div>
-                  ) : (
-                    <div className="grid gap-2 md:grid-cols-2">
-                      {reservations.map((resv) => (
-                        <div key={resv.id} className="border rounded p-2 text-sm text-gray-700">
-                          <div>ID rezervare: {resv.id}</div>
-                          <div>Status: {resv.status || '—'}</div>
-                          <div>Pasager: {resv.passenger_name || '—'}</div>
-                          <div>Telefon: {resv.passenger_phone || '—'}</div>
-                          <div>Loc: {resv.seat_label || resv.seat_id || '—'}</div>
-                          <div>Secțiune: {resv.board_name || '—'} → {resv.exit_name || '—'}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <div className="text-sm font-semibold text-gray-800">Payload provider</div>
-                  <pre className="bg-gray-50 border rounded p-2 text-xs overflow-auto max-h-48">
-                    {payloadPreview || '—'}
-                  </pre>
                 </div>
 
                 {refund.status === 'failed' && (
