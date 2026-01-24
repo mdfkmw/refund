@@ -62,11 +62,13 @@ function ReservationCard({
   fallbackPassengerName,
   refundState,
   onRefund,
+  showRefundAction,
 }: {
   reservation: AccountReservation
   fallbackPassengerName: string
   refundState?: { status: 'idle' | 'pending' | 'success' | 'error'; message?: string }
   onRefund?: (orderId: number) => void
+  showRefundAction?: boolean
 }) {
   const statusMeta = getStatusMeta(reservation.status)
   const passengerName = reservation.passenger_name?.trim() || fallbackPassengerName
@@ -83,7 +85,7 @@ function ReservationCard({
   const showPaid = paidValue > 0
   const showDue = !isRefunded && dueValue != null && dueValue > 0.01
   const reservationDateLabel = reservation.reservation_time ? formatRoDate(reservation.reservation_time) : null
-  const canRefund = Boolean(reservation.order_id && reservation.is_paid && !isRefunded)
+  const canRefund = Boolean(showRefundAction && reservation.order_id && reservation.is_paid && !isRefunded)
   const refundStatus = refundState?.status || 'idle'
 
   return (
@@ -171,14 +173,14 @@ function ReservationCard({
         </div>
       </div>
 
-      {(canRefund || refundStatus !== 'idle') && (
+      {(canRefund || (showRefundAction && refundStatus !== 'idle')) && (
         <div className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/70">
           {canRefund && (
             <button
               type="button"
               onClick={() => reservation.order_id && onRefund?.(reservation.order_id)}
               disabled={refundStatus === 'pending'}
-              className="inline-flex items-center justify-center rounded-xl border border-rose-400/40 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-100 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center justify-center rounded-lg border border-rose-400/20 bg-transparent px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-rose-100/80 transition hover:bg-rose-500/10 hover:text-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {refundStatus === 'pending' ? 'Se procesează refund-ul...' : 'Anulează și cere refund'}
             </button>
@@ -301,7 +303,7 @@ function AccountPageContent() {
   const pastReservations = reservations?.past ?? []
   const initialLoading = reservationsLoading && !reservations
 
-  const renderReservationGroup = (items: AccountReservation[], emptyMessage: string) => {
+  const renderReservationGroup = (items: AccountReservation[], emptyMessage: string, showRefundAction = false) => {
     if (!items.length) {
       if (initialLoading && !reservationsError) {
         return <p className="text-sm text-white/60">Se încarcă rezervările...</p>
@@ -317,6 +319,7 @@ function AccountPageContent() {
             fallbackPassengerName={displayName}
             refundState={reservation.order_id ? refundState[reservation.order_id] : undefined}
             onRefund={(orderId) => handleRefund(orderId)}
+            showRefundAction={showRefundAction}
           />
         ))}
       </div>
@@ -324,6 +327,9 @@ function AccountPageContent() {
   }
 
   const handleRefund = async (orderId: number) => {
+    if (!window.confirm('Ești sigur că vrei să anulezi rezervarea și să ceri refund?')) {
+      return
+    }
     setRefundState((prev) => ({
       ...prev,
       [orderId]: { status: 'pending' },
@@ -459,7 +465,7 @@ function AccountPageContent() {
               <span className="text-xs uppercase tracking-wide text-white/50">Se actualizează…</span>
             )}
           </div>
-          {renderReservationGroup(upcomingReservations, 'Nu ai rezervări viitoare în acest moment.')}
+          {renderReservationGroup(upcomingReservations, 'Nu ai rezervări viitoare în acest moment.', true)}
         </section>
 
         <section className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur px-5 py-6 space-y-4">
