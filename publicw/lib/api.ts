@@ -206,6 +206,8 @@ export interface AccountReservation {
   paid_amount: number | null;
   payment_method: string | null;
   is_paid: boolean;
+  order_id: number | null;
+  is_refunded: boolean;
   currency: string | null;
 }
 
@@ -515,6 +517,12 @@ export async function logoutPublicSession(): Promise<void> {
 
 export async function fetchAccountReservations(): Promise<AccountReservationsResponse> {
   return request<AccountReservationsResponse>('/api/public/account/reservations');
+}
+
+export async function refundPublicOrder(orderId: number): Promise<{ success: boolean; message?: string }> {
+  return request<{ success: boolean; message?: string }>(`/api/public/orders/${orderId}/refund`, {
+    method: 'POST',
+  });
 }
 
 type ReceiptApiResponse = {
