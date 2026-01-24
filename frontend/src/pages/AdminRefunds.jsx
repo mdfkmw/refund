@@ -131,7 +131,6 @@ export default function AdminRefunds() {
             const order = item?.order || {};
             const paymentPublic = item?.payment_public || {};
             const reservations = Array.isArray(item?.reservations) ? item.reservations : [];
-            const isFailed = refund.status === 'failed';
             const payloadPreview = refund.provider_payload
               ? refund.provider_payload
               : null;
@@ -192,32 +191,30 @@ export default function AdminRefunds() {
                   </div>
                 </div>
 
-                {isFailed && (
-                  <div className="border-t pt-3 space-y-2">
-                    <div className="text-sm font-semibold text-gray-800">Detalii rezervări</div>
-                    {reservations.length === 0 ? (
-                      <div className="text-sm text-gray-500">Nu există rezervări asociate.</div>
-                    ) : (
-                      <div className="grid gap-2 md:grid-cols-2">
-                        {reservations.map((resv) => (
-                          <div key={resv.id} className="border rounded p-2 text-sm text-gray-700">
-                            <div>ID rezervare: {resv.id}</div>
-                            <div>Status: {resv.status || '—'}</div>
-                            <div>Pasager: {resv.passenger_name || '—'}</div>
-                            <div>Telefon: {resv.passenger_phone || '—'}</div>
-                            <div>Loc: {resv.seat_label || resv.seat_id || '—'}</div>
-                            <div>Secțiune: {resv.board_name || '—'} → {resv.exit_name || '—'}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                <div className="border-t pt-3 space-y-2">
+                  <div className="text-sm font-semibold text-gray-800">Detalii rezervări</div>
+                  {reservations.length === 0 ? (
+                    <div className="text-sm text-gray-500">Nu există rezervări asociate.</div>
+                  ) : (
+                    <div className="grid gap-2 md:grid-cols-2">
+                      {reservations.map((resv) => (
+                        <div key={resv.id} className="border rounded p-2 text-sm text-gray-700">
+                          <div>ID rezervare: {resv.id}</div>
+                          <div>Status: {resv.status || '—'}</div>
+                          <div>Pasager: {resv.passenger_name || '—'}</div>
+                          <div>Telefon: {resv.passenger_phone || '—'}</div>
+                          <div>Loc: {resv.seat_label || resv.seat_id || '—'}</div>
+                          <div>Secțiune: {resv.board_name || '—'} → {resv.exit_name || '—'}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
-                    <div className="text-sm font-semibold text-gray-800">Payload provider</div>
-                    <pre className="bg-gray-50 border rounded p-2 text-xs overflow-auto max-h-48">
-                      {payloadPreview || '—'}
-                    </pre>
-                  </div>
-                )}
+                  <div className="text-sm font-semibold text-gray-800">Payload provider</div>
+                  <pre className="bg-gray-50 border rounded p-2 text-xs overflow-auto max-h-48">
+                    {payloadPreview || '—'}
+                  </pre>
+                </div>
 
                 {refund.status === 'failed' && (
                   <div className="flex justify-end">
