@@ -2461,10 +2461,6 @@ router.post('/orders/:orderId/refund', requirePublicAuth, async (req, res) => {
       return res.status(409).json({ error: 'Suma refund-ului nu este validă.' });
     }
 
-    const ipayRes = await refundDo({ orderId: providerOrderId, amountMinor }, override);
-    const providerRefundId = ipayRes?.refundId || ipayRes?.refund_id || ipayRes?.id || null;
-    const providerPayload = JSON.stringify(ipayRes ?? null);
-
     const { rows: reservationPayments } = await execQuery(
       conn,
       `
@@ -2481,6 +2477,38 @@ router.post('/orders/:orderId/refund', requirePublicAuth, async (req, res) => {
       .filter((value) => Number.isFinite(value));
 
     const paymentId = reservationPayments.length ? reservationPayments[0].id : null;
+
+    let ipayRes = null;
+    try {
+      ipayRes = await refundDo({ orderId: providerOrderId, amountMinor }, override);
+    } catch (err) {
+      const providerPayload = JSON.stringify(err?.payload ?? null);
+      await execQuery(
+        conn,
+        `
+          INSERT INTO payment_refunds
+            (payment_id, public_order_payment_id, order_id, amount, currency, status, provider,
+             provider_transaction_id, provider_payload, reason, requested_by, requested_by_type)
+          VALUES (?, ?, ?, ?, 'RON', 'failed', 'ipay', ?, ?, ?, ?, 'public_user')
+        `,
+        [
+          paymentId,
+          paymentPublic.id,
+          orderId,
+          Number(amount.toFixed(2)),
+          providerOrderId,
+          providerPayload,
+          'refund_failed',
+          publicUserId,
+        ],
+      );
+      await conn.commit();
+      conn.release();
+      return res.status(502).json({ error: 'Refund-ul nu a putut fi procesat. Te rugăm să încerci din nou.' });
+    }
+
+    const providerRefundId = ipayRes?.refundId || ipayRes?.refund_id || ipayRes?.id || null;
+    const providerPayload = JSON.stringify(ipayRes ?? null);
 
     await execQuery(
       conn,
