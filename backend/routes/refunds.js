@@ -59,6 +59,7 @@ router.get('/', async (_req, res) => {
           r.id AS reservation_id,
           r.status AS reservation_status,
           r.seat_id,
+          s.label AS seat_label,
           r.board_station_id AS reservation_board_station_id,
           r.exit_station_id AS reservation_exit_station_id,
           t.date AS trip_date,
@@ -77,6 +78,7 @@ router.get('/', async (_req, res) => {
         LEFT JOIN reservations r ON r.id = p.reservation_id
         LEFT JOIN trips t ON t.id = o.trip_id
         LEFT JOIN routes rt ON rt.id = t.route_id
+        LEFT JOIN seats s ON s.id = r.seat_id
         LEFT JOIN stations sb ON sb.id = r.board_station_id
         LEFT JOIN stations se ON se.id = r.exit_station_id
         LEFT JOIN people pe ON pe.id = r.person_id
@@ -155,6 +157,7 @@ router.get('/', async (_req, res) => {
             id: reservationId,
             status: row.reservation_status || null,
             seat_id: row.seat_id ? Number(row.seat_id) : null,
+            seat_label: row.seat_label || null,
             board_station_id: row.reservation_board_station_id ? Number(row.reservation_board_station_id) : null,
             exit_station_id: row.reservation_exit_station_id ? Number(row.reservation_exit_station_id) : null,
             board_name: row.board_name || null,

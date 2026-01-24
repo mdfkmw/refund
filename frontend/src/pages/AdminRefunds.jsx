@@ -166,7 +166,7 @@ export default function AdminRefunds() {
                 <div className="grid gap-3 md:grid-cols-3 text-sm text-gray-700">
                   <div className="space-y-1">
                     <div className="text-xs uppercase text-gray-400">Comandă</div>
-                    <div>ID: {order.id || '—'}</div>
+                    <div>ORDER ID: {order.id || '—'}</div>
                     <div>Status: {order.status || '—'}</div>
                     <div>Client: {order.customer_name || '—'}</div>
                     <div>Telefon: {order.customer_phone || '—'}</div>
@@ -205,9 +205,8 @@ export default function AdminRefunds() {
                             <div>Status: {resv.status || '—'}</div>
                             <div>Pasager: {resv.passenger_name || '—'}</div>
                             <div>Telefon: {resv.passenger_phone || '—'}</div>
-                            <div>Loc: {resv.seat_id || '—'}</div>
-                            <div>Îmbarcare: {resv.board_name || '—'}</div>
-                            <div>Debarcare: {resv.exit_name || '—'}</div>
+                            <div>Loc: {resv.seat_label || resv.seat_id || '—'}</div>
+                            <div>Secțiune: {resv.board_name || '—'} → {resv.exit_name || '—'}</div>
                           </div>
                         ))}
                       </div>
