@@ -130,6 +130,33 @@ function buildSaleTLV(amountLei, uniqueIdStr = "000000000001") {
   ]);
 }
 
+function buildRefundTLV(amountLei, uniqueIdStr = null, extraTags = []) {
+  const amountStr = Number(amountLei).toFixed(2).replace(".", "");
+  const amount12 = amountStr.padStart(12, "0");
+
+  const tlvs = [
+    tlv(0xA000, Buffer.from([0x03])), // 03 – Refund by card (SmartPay ECR)
+    tlv(0xA001, ascii(amount12)), // Amount
+    tlv(0xA002, ascii("RON")), // Currency name
+    tlv(0xA003, ascii("946")), // Currency code
+  ];
+
+  if (uniqueIdStr) {
+    const unique12 = String(uniqueIdStr).padStart(12, "0").slice(0, 12);
+    tlvs.push(tlv(0xA008, ascii(unique12))); // Unique ID
+  }
+
+  for (const entry of extraTags || []) {
+    if (!entry || !entry.tag || entry.value == null) continue;
+    const tagHex = String(entry.tag).toUpperCase().replace(/^0X/, "");
+    const tagNum = Number.parseInt(tagHex, 16);
+    if (!Number.isFinite(tagNum)) continue;
+    tlvs.push(tlv(tagNum, ascii(String(entry.value))));
+  }
+
+  return Buffer.concat(tlvs);
+}
+
 // ────────────── Parsare TLV din raspuns ────────────────────────
 
 function parseTlvResponse(tlvBuf) {
@@ -434,6 +461,11 @@ async function posSale(dev, amountLei, uniqueId) {
   return sendPosCommand(dev, tlvReq);
 }
 
+async function posRefund(dev, amountLei, uniqueId, extraTags) {
+  const tlvReq = buildRefundTLV(amountLei, uniqueId, extraTags);
+  return sendPosCommand(dev, tlvReq);
+}
+
 // ───────────── HTTP server (Express) ───────────────────────────
 
 const app = express();
@@ -532,6 +564,64 @@ app.post("/pos/sale", async (req, res) => {
   }
 });
 
+// POST /pos/refund?dev=A|B
+// Body JSON: { amount: 12.34, uniqueId?: "123", extra_tags?: [{ tag: "A012", value: "..." }] }
+app.post("/pos/refund", async (req, res) => {
+  const dev = (req.query.dev || "A").toUpperCase();
+  const amount = Number(req.body?.amount || 0);
+  const uniqueId = req.body?.uniqueId || null;
+  const extraTags = Array.isArray(req.body?.extra_tags) ? req.body.extra_tags : [];
+
+  if (!amount || amount <= 0) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "AMOUNT_REQUIRED_OR_INVALID" });
+  }
+
+  console.log(`\n=== /pos/refund dev=${dev} amount=${amount.toFixed(2)} ===`);
+
+  try {
+    const result = await posRefund(dev, amount, uniqueId, extraTags);
+    if (!result.ok) {
+      const message = mapPosDeclineMessageFromTags(
+        result.tags,
+        result.errorCode,
+        result.hostResp
+      );
+      return res.status(409).json({
+        ok: false,
+        error: "POS_DECLINED",
+        message,
+        errorCode: result.errorCode,
+        hostResp: result.hostResp,
+      });
+    }
+
+    res.json({
+      ok: true,
+      errorCode: result.errorCode,
+      hostResp: result.hostResp,
+      tags: Object.fromEntries(
+        Object.entries(result.tags).map(([k, v]) => [k, bufToAscii(v)])
+      ),
+    });
+  } catch (e) {
+    console.error("Eroare /pos/refund:", e);
+    const msg = String(e?.message || e);
+    if (msg === "POS_NOT_CONNECTED") {
+      return res
+        .status(503)
+        .json({ ok: false, error: "POS_NOT_CONNECTED", message: "POS nu este conectat" });
+    }
+    if (msg === "POS_TIMEOUT") {
+      return res
+        .status(504)
+        .json({ ok: false, error: "POS_TIMEOUT", message: "Timeout POS" });
+    }
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
 app.listen(HTTP_PORT, () => {
   console.log(
     `🚀 POS bridge pornit pe http://127.0.0.1:${HTTP_PORT} (A=${POS_DEVS.A}, B=${POS_DEVS.B})`
@@ -560,4 +650,5 @@ SerialPort.list().then((ports) => {
 module.exports = {
   posGetInfo,
   posSale,
+  posRefund,
 };

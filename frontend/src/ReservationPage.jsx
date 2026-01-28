@@ -1737,8 +1737,11 @@ export default function ReservationPage({ userRole, user }) {
               paymentStatusTimerRef.current = null;
             }
 
+            const isRefundJob = lastJob?.job_type === 'card_refund';
             const msgFinal = [
-              `Plata ${methodLabel} ${amountStr} a eșuat.`,
+              isRefundJob
+                ? `Refund ${methodLabel} ${amountStr} a eșuat.`
+                : `Plata ${methodLabel} ${amountStr} a eșuat.`,
               errorMsg ? `Eroare: ${errorMsg}` : 'Eroare necunoscută.',
             ]
               .filter(Boolean)
@@ -1780,6 +1783,12 @@ export default function ReservationPage({ userRole, user }) {
               // ✅ SUCCES – 10 secunde pe ecran
               showToast(
                 `Plată ${methodLabel} ${amountStr} – finalizată ✅ (bon OK)`,
+                'success',
+                10000
+              );
+            } else if (status === 'refunded') {
+              showToast(
+                `Refund ${methodLabel} ${amountStr} – finalizat ✅`,
                 'success',
                 10000
               );
@@ -3808,6 +3817,29 @@ export default function ReservationPage({ userRole, user }) {
     [user?.id]
   );
 
+  const performCardRefund = useCallback(async ({ reservationId }) => {
+    if (!reservationId) {
+      throw new Error('ID rezervare invalid pentru refund');
+    }
+
+    const res = await fetch(`/api/reservations/${reservationId}/refunds/card-agent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+      credentials: 'include',
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || `Eroare inițiere refund (agent) (${res.status})`);
+    }
+    if (!data?.ok) {
+      throw new Error(data?.error || 'Răspuns invalid de la /refunds/card-agent');
+    }
+
+    return data;
+  }, []);
+
   const handleRetryReceipt = useCallback(
     async ({ reservationId, paymentId }) => {
       if (!reservationId || !paymentId) {
@@ -4825,6 +4857,42 @@ export default function ReservationPage({ userRole, user }) {
     popupPassenger?.reservation_id,
     user?.id,
     performCardPayment,
+    startPaymentStatusPolling,
+  ]);
+
+  const handleRefundReservationCard = useCallback(async () => {
+    if (!popupPassenger?.reservation_id) return;
+
+    if (globalPaymentLock) {
+      showToast('Există o tranzacție în curs. Așteaptă finalizarea.', 'warning', 4000);
+      return;
+    }
+
+    try {
+      setPaying(true);
+      await performCardRefund({ reservationId: popupPassenger.reservation_id });
+      showToast('Refund inițiat pe POS…', 'info', 3000);
+      startPaymentStatusPolling(popupPassenger.reservation_id);
+
+      try {
+        lastSeatsFetchKeyRef.current = null;
+      } catch {
+        // ignorăm
+      }
+    } catch (e) {
+      console.error('[handleRefundReservationCard] eroare:', e);
+      showToast(e.message || 'Eroare la refundul cu cardul', 'error', 8000);
+    } finally {
+      setPaying(false);
+      setPopupPassenger(null);
+      setPopupSeat(null);
+      setPopupPosition(null);
+    }
+  }, [
+    popupPassenger?.reservation_id,
+    globalPaymentLock,
+    performCardRefund,
+    showToast,
     startPaymentStatusPolling,
   ]);
 
@@ -6142,6 +6210,7 @@ export default function ReservationPage({ userRole, user }) {
 
           onPayCash={handlePayReservation}
           onPayCard={handlePayReservationCard}
+          onRefundCard={handleRefundReservationCard}
           onRetryReceipt={handleRetryReceipt}
 
           globalPaymentLock={globalPaymentLock}

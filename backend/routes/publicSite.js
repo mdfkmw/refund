@@ -1523,6 +1523,8 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
         COALESCE(payments.total_paid, 0) AS paid_amount,
         payments.last_method AS payment_method,
         payments.has_paid AS has_paid,
+        payments.order_id AS order_id,
+        payments.has_refunded AS has_refunded,
         CASE
           WHEN t.date IS NULL THEN 1
           WHEN t.time IS NULL THEN CASE WHEN t.date < CURDATE() THEN 1 ELSE 0 END
@@ -1547,7 +1549,9 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
           reservation_id,
           SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END) AS total_paid,
           MAX(CASE WHEN status = 'paid' THEN payment_method ELSE NULL END) AS last_method,
-          MAX(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS has_paid
+          MAX(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS has_paid,
+          MAX(order_id) AS order_id,
+          MAX(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END) AS has_refunded
         FROM payments
         GROUP BY reservation_id
       ) payments ON payments.reservation_id = r.id
@@ -1578,6 +1582,8 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
       const paidAmount = row.paid_amount != null ? Number(row.paid_amount) : 0;
       const isPast = Number(row.is_past) === 1;
       const isPaid = Number(row.has_paid) === 1;
+      const orderId = Number.isFinite(Number(row.order_id)) ? Number(row.order_id) : null;
+      const isRefunded = Number(row.has_refunded) === 1;
 
       const entry = {
         id,
@@ -1600,6 +1606,8 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
         paid_amount: paidAmount,
         payment_method: row.payment_method || null,
         is_paid: isPaid,
+        order_id: orderId,
+        is_refunded: isRefunded,
         currency: 'RON',
       };
 
@@ -2277,7 +2285,7 @@ router.post('/reservations', async (req, res) => {
 // PAYMENT (PUBLIC) - iPay implementation (provider-agnostic entry points)
 // ============================================================
 
-const { registerDo, getOrderStatusExtendedDo } = require('../utils/ipay');
+const { registerDo, getOrderStatusExtendedDo, refundDo } = require('../utils/ipay');
 
 function buildIpayOverrideForOperator(operatorId) {
   const baseUrl = String(process.env.IPAY_BASE_URL || '').trim();
@@ -2308,6 +2316,271 @@ function buildIpayOverrideForOperator(operatorId) {
 
   return null;
 }
+
+router.post('/orders/:orderId/refund', requirePublicAuth, async (req, res) => {
+  const orderId = Number(req.params.orderId);
+  if (!Number.isFinite(orderId) || orderId <= 0) {
+    return res.status(400).json({ error: 'orderId invalid.' });
+  }
+
+  const publicUserId = Number(req.publicUser?.id);
+  if (!Number.isFinite(publicUserId) || publicUserId <= 0) {
+    return res.status(401).json({ error: 'Autentificare necesară.' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const { rows: orderRows } = await execQuery(
+      conn,
+      `
+        SELECT id, trip_id, operator_id, public_user_id, status, total_amount, payment_provider
+          FROM orders
+         WHERE id = ?
+         LIMIT 1
+      `,
+      [orderId],
+    );
+
+    if (!orderRows.length) {
+      await conn.rollback();
+      conn.release();
+      return res.status(404).json({ error: 'Comanda nu există.' });
+    }
+
+    const order = orderRows[0];
+
+    if (Number(order.public_user_id) !== publicUserId) {
+      await conn.rollback();
+      conn.release();
+      return res.status(403).json({ error: 'Nu ai acces la această comandă.' });
+    }
+
+    if (String(order.status) !== 'paid') {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Comanda nu este plătită sau este deja anulată.' });
+    }
+
+    const { rows: existingRefunds } = await execQuery(
+      conn,
+      `
+        SELECT id
+          FROM payment_refunds
+         WHERE order_id = ?
+           AND status IN ('pending', 'succeeded')
+         ORDER BY id DESC
+         LIMIT 1
+      `,
+      [orderId],
+    );
+
+    if (existingRefunds.length) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Refund-ul pentru această comandă este deja în curs sau procesat.' });
+    }
+
+    const { rows: paymentRows } = await execQuery(
+      conn,
+      `
+        SELECT id, amount, provider, provider_payment_id
+          FROM payments_public_orders
+         WHERE order_id = ?
+           AND status = 'paid'
+         ORDER BY id DESC
+         LIMIT 1
+      `,
+      [orderId],
+    );
+
+    if (!paymentRows.length) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Nu am găsit o plată validă pentru această comandă.' });
+    }
+
+    const paymentPublic = paymentRows[0];
+    const providerOrderId = paymentPublic.provider_payment_id ? String(paymentPublic.provider_payment_id) : '';
+    if (!providerOrderId) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Comanda nu are un identificator valid la provider.' });
+    }
+
+    const provider = String(order.payment_provider || paymentPublic.provider || 'ipay').toLowerCase();
+    if (provider !== 'ipay') {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Providerul de plată nu permite refund online.' });
+    }
+
+    const { rows: tripRows } = await execQuery(
+      conn,
+      `SELECT date, time FROM trips WHERE id = ? LIMIT 1`,
+      [order.trip_id],
+    );
+    if (!tripRows.length) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Cursa nu există.' });
+    }
+
+    const tripDateTime = buildDateTimeFromDateAndTime(tripRows[0].date, tripRows[0].time);
+    const settings = await getOnlineSettings();
+    const minNotice = Number(settings.onlineCancelMinNoticeMinutes || 0);
+    if (minNotice > 0) {
+      if (!tripDateTime) {
+        await conn.rollback();
+        conn.release();
+        return res.status(409).json({ error: 'Nu putem valida ora plecării pentru refund.' });
+      }
+      const diffMinutes = (tripDateTime.getTime() - Date.now()) / (60 * 1000);
+      if (diffMinutes < minNotice) {
+        await conn.rollback();
+        conn.release();
+        return res.status(409).json({
+          error: `Refund-ul se poate solicita doar cu cel puțin ${formatAdvanceLimit(minNotice)} înainte de plecare.`,
+        });
+      }
+    }
+
+    const override = buildIpayOverrideForOperator(order.operator_id);
+    if (!override) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Refund-ul online nu este disponibil pentru acest operator.' });
+    }
+
+    const amount = Number(paymentPublic.amount ?? order.total_amount);
+    const amountMinor = Math.round(amount * 100);
+    if (!Number.isFinite(amountMinor) || amountMinor <= 0) {
+      await conn.rollback();
+      conn.release();
+      return res.status(409).json({ error: 'Suma refund-ului nu este validă.' });
+    }
+
+    const { rows: reservationPayments } = await execQuery(
+      conn,
+      `
+        SELECT id, reservation_id
+          FROM payments
+         WHERE order_id = ?
+           AND status = 'paid'
+      `,
+      [orderId],
+    );
+
+    const reservationIds = reservationPayments
+      .map((row) => Number(row.reservation_id))
+      .filter((value) => Number.isFinite(value));
+
+    const paymentId = reservationPayments.length ? reservationPayments[0].id : null;
+
+    let ipayRes = null;
+    try {
+      ipayRes = await refundDo({ orderId: providerOrderId, amountMinor }, override);
+    } catch (err) {
+      const providerPayload = JSON.stringify(err?.payload ?? null);
+      await execQuery(
+        conn,
+        `
+          INSERT INTO payment_refunds
+            (payment_id, public_order_payment_id, order_id, amount, currency, status, provider,
+             provider_transaction_id, provider_payload, reason, requested_by, requested_by_type)
+          VALUES (?, ?, ?, ?, 'RON', 'failed', 'ipay', ?, ?, ?, ?, 'public_user')
+        `,
+        [
+          paymentId,
+          paymentPublic.id,
+          orderId,
+          Number(amount.toFixed(2)),
+          providerOrderId,
+          providerPayload,
+          'refund_failed',
+          publicUserId,
+        ],
+      );
+      await conn.commit();
+      conn.release();
+      return res.status(502).json({ error: 'Refund-ul nu a putut fi procesat. Te rugăm să încerci din nou.' });
+    }
+
+    const providerRefundId = ipayRes?.refundId || ipayRes?.refund_id || ipayRes?.id || null;
+    const providerPayload = JSON.stringify(ipayRes ?? null);
+
+    await execQuery(
+      conn,
+      `
+        INSERT INTO payment_refunds
+          (payment_id, public_order_payment_id, order_id, amount, currency, status, provider,
+           provider_refund_id, provider_transaction_id, provider_payload, reason, requested_by,
+           requested_by_type, processed_at)
+        VALUES (?, ?, ?, ?, 'RON', 'succeeded', 'ipay', ?, ?, ?, ?, ?, 'public_user', NOW())
+      `,
+      [
+        paymentId,
+        paymentPublic.id,
+        orderId,
+        Number(amount.toFixed(2)),
+        providerRefundId,
+        providerOrderId,
+        providerPayload,
+        'refund_public',
+        publicUserId,
+      ],
+    );
+
+    await execQuery(conn, `UPDATE orders SET status = 'cancelled' WHERE id = ?`, [orderId]);
+    await execQuery(conn, `UPDATE payments_public_orders SET status = 'refunded' WHERE id = ?`, [paymentPublic.id]);
+    await execQuery(conn, `UPDATE payments SET status = 'refunded' WHERE order_id = ? AND status = 'paid'`, [orderId]);
+
+    if (reservationIds.length) {
+      const placeholders = reservationIds.map(() => '?').join(',');
+      await execQuery(
+        conn,
+        `
+          UPDATE reservations
+             SET status = 'cancelled',
+                 version = version + 1
+           WHERE id IN (${placeholders})
+        `,
+        reservationIds,
+      );
+
+      for (const reservationId of reservationIds) {
+        const details = JSON.stringify({
+          source: 'public_site',
+          order_id: orderId,
+          requested_by: publicUserId,
+        });
+        await execQuery(
+          conn,
+          `
+            INSERT INTO reservation_events (reservation_id, action, actor_id, details)
+            VALUES (?, 'refund', NULL, ?)
+          `,
+          [reservationId, details],
+        );
+      }
+    }
+
+    await conn.commit();
+    conn.release();
+
+    return res.json({ success: true, message: 'Refund-ul a fost procesat.' });
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    conn.release();
+    console.error('[public/orders/refund] error', err);
+    return res.status(500).json({ error: 'Nu am putut procesa refund-ul.' });
+  }
+});
 
 
 // Start payment pentru o comanda (order)
