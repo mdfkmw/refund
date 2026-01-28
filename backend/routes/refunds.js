@@ -74,7 +74,7 @@ router.get('/', async (_req, res) => {
         FROM payment_refunds pr
         LEFT JOIN orders o ON o.id = pr.order_id
         LEFT JOIN payments_public_orders ppo ON ppo.id = pr.public_order_payment_id
-        LEFT JOIN payments p ON p.order_id = pr.order_id
+        LEFT JOIN payments p ON (p.id = pr.payment_id OR p.order_id = pr.order_id)
         LEFT JOIN reservations r ON r.id = p.reservation_id
         LEFT JOIN trips t ON t.id = o.trip_id
         LEFT JOIN routes rt ON rt.id = t.route_id

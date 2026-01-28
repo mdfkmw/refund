@@ -11,6 +11,7 @@ export default function PassengerPopup({
   onMoveToOtherTrip,    // ← aici
   onPayCash,
   onPayCard,
+  onRefundCard,
   onRetryReceipt,
   selectedDate,         // ← aici
   selectedHour,         // ← aici
@@ -114,6 +115,10 @@ export default function PassengerPopup({
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [paymentError, setPaymentError] = useState(null);
   const isPaid = !!paymentStatus && paymentStatus.status === 'paid';
+  const canRefundCard =
+    !!paymentStatus &&
+    paymentStatus.payment_method === 'card' &&
+    (paymentStatus.status === 'paid' || paymentStatus.status === 'pos_ok_waiting_receipt');
 
 
 
@@ -329,6 +334,22 @@ export default function PassengerPopup({
 
     // doar feedback UI - polling-ul și finalul se rezolvă în ReservationPage
     showToast('Re-emite bon fiscal trimis către agent…', 'info', 0);
+  };
+
+  const handleRefundCard = () => {
+    if (!paymentStatus || !passenger?.reservation_id) return;
+    if (!onRefundCard) {
+      console.error('[PassengerPopup] lipseste prop onRefundCard');
+      showToast('Eroare internă: lipsește handlerul de refund.', 'error', 8000);
+      return;
+    }
+    if (!window.confirm('Ești sigur că vrei să inițiezi refundul pe POS?')) {
+      return;
+    }
+    onRefundCard({
+      reservationId: passenger.reservation_id,
+      paymentId: paymentStatus.payment_id,
+    });
   };
 
 
@@ -614,6 +635,22 @@ export default function PassengerPopup({
             }
           >
             💳 Achită cu cardul
+          </button>
+        )}
+
+        {onRefundCard && canRefundCard && (
+          <button
+            onClick={handleRefundCard}
+            disabled={hasActiveJob}
+            title={hasActiveJob ? 'Există o tranzacție în curs.' : ''}
+            className={
+              `block w-full text-left px-4 py-2 ` +
+              (hasActiveJob
+                ? 'text-gray-400 bg-gray-50 cursor-not-allowed'
+                : 'hover:bg-gray-100 text-rose-700')
+            }
+          >
+            ↩️ Refund card (POS)
           </button>
         )}
 

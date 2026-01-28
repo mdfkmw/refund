@@ -113,6 +113,7 @@ async function handleJob(job) {
   const amount = Number(payload.amount || 0);
   const itemName = String(payload.description || "BILET").slice(0, 48);
   const devLabel = String(payload.dev || "A");
+  const posUniqueId = payload.pos_unique_id || payload.unique_id || payload.payment_id || null;
 
   // 1) CASH + bon fiscal (fără POS)
   if (job.job_type === "cash_receipt_only") {
@@ -202,6 +203,7 @@ if (job.job_type === "card_and_receipt") {
       amount: amount.toFixed(2),
       currency: payload.currency || "RON",
       description: itemName,
+      uniqueId: posUniqueId,
     };
 
     console.log("[AGENT] [POS] SALE", posUrl, "body=", posBody);
@@ -241,6 +243,9 @@ if (job.job_type === "card_and_receipt") {
 
     report.pos_ok = true;
     report.result.pos.ok = true;
+    report.result.pos.tags = posData?.tags || null;
+    report.result.pos.hostResp = posData?.hostResp || null;
+    report.result.pos.errorCode = posData?.errorCode || null;
 
     // ---------- FISCAL ----------
     await callFiscal("/fiscal/open", {
@@ -294,6 +299,80 @@ if (job.job_type === "card_and_receipt") {
 
   return;
 }
+
+  // 4) CARD REFUND via POS
+  if (job.job_type === "card_refund") {
+    const report = {
+      success: false,
+      pos_ok: false,
+      fiscal_ok: true, // nu avem fiscal la refund POS
+      error_message: null,
+      result: {
+        pos: { ok: false },
+        fiscal: { ok: true },
+      },
+    };
+
+    try {
+      const posUrl = `${POS_BASE_URL}/pos/refund?dev=${encodeURIComponent(devLabel)}`;
+      const posBody = {
+        amount: amount.toFixed(2),
+        currency: payload.currency || "RON",
+        uniqueId: posUniqueId,
+        extra_tags: Array.isArray(payload.extra_tags) ? payload.extra_tags : [],
+      };
+
+      console.log("[AGENT] [POS] REFUND", posUrl, "body=", posBody);
+
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 180000);
+
+      const posRes = await fetch(posUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(posBody),
+        signal: controller.signal,
+      });
+
+      clearTimeout(t);
+
+      const posData = await posRes.json().catch(() => ({}));
+      console.log("[AGENT] [POS] REFUND response", posRes.status, posData);
+
+      const approved =
+        posRes.ok &&
+        (posData?.ok === true ||
+          posData?.approved === true ||
+          String(posData?.status || "").toLowerCase() === "approved");
+
+      if (!approved) {
+        throw new Error(
+          posData?.message ||
+          posData?.error ||
+          `POS_HTTP_${posRes.status}`
+        );
+      }
+
+      report.pos_ok = true;
+      report.result.pos.ok = true;
+      report.result.pos.tags = posData?.tags || null;
+      report.result.pos.hostResp = posData?.hostResp || null;
+      report.result.pos.errorCode = posData?.errorCode || null;
+      report.success = true;
+    } catch (e) {
+      console.error("[AGENT] card_refund ERROR:", e);
+      report.error_message = String(e.message || "CARD_REFUND_FAILED");
+    }
+
+    try {
+      await sendJobReport(job.id, report);
+      console.log("[AGENT] Report trimis pentru job", job.id);
+    } catch (e) {
+      console.error("[AGENT] Eroare trimitere report:", e);
+    }
+
+    return;
+  }
 
 
   // 3) RETRY DOAR BON FISCAL (fără POS)

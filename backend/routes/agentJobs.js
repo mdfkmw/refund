@@ -34,7 +34,7 @@ router.post('/agent/jobs/:id/report', async (req, res) => {
 
     // 1) luăm jobul
     const jobRes = await db.query(
-      `SELECT id, reservation_id, payment_id, job_type, status
+      `SELECT id, reservation_id, payment_id, job_type, status, payload
          FROM agent_jobs
         WHERE id = ?
         LIMIT 1`,
@@ -67,7 +67,81 @@ const newJobStatus = success ? 'done' : 'error';
     );
 
     // 3) dacă jobul este legat de un payment, actualizăm și payments
+    if (job.job_type === 'card_refund') {
+      const payload = (() => {
+        try {
+          return job.payload ? JSON.parse(job.payload) : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      const refundId = Number(payload?.refund_id || 0) || null;
+      const posPayload = result?.pos ? JSON.stringify(result.pos) : null;
+
+      if (refundId) {
+        await db.query(
+          `UPDATE payment_refunds
+              SET status = ?,
+                  processed_at = NOW(),
+                  provider_payload = ?,
+                  reason = ?
+            WHERE id = ?`,
+          [success ? 'succeeded' : 'failed', posPayload, error_message || null, refundId]
+        );
+      }
+
+      if (success && job.payment_id) {
+        await db.query(`UPDATE payments SET status = 'refunded' WHERE id = ?`, [job.payment_id]);
+        if (job.reservation_id) {
+          await db.query(
+            `UPDATE reservations
+                SET status = 'cancelled',
+                    version = version + 1
+              WHERE id = ?`,
+            [job.reservation_id]
+          );
+          await db.query(
+            `INSERT INTO reservation_events (reservation_id, action, actor_id, details)
+             VALUES (?, 'refund', NULL, ?)`,
+            [
+              job.reservation_id,
+              JSON.stringify({
+                source: 'pos_refund',
+                refund_id: refundId,
+                payment_id: job.payment_id,
+              }),
+            ]
+          );
+        }
+      }
+
+      return res.json({ ok: true });
+    }
+
     if (job.payment_id) {
+      const payload = (() => {
+        try {
+          return job.payload ? JSON.parse(job.payload) : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      if (pos_ok && result?.pos && (job.job_type === 'card_and_receipt' || job.job_type === 'retry_receipt')) {
+        const posMeta = {
+          unique_id: payload?.pos_unique_id || payload?.unique_id || payload?.payment_id || null,
+          tags: result?.pos?.tags || null,
+          hostResp: result?.pos?.hostResp || null,
+          errorCode: result?.pos?.errorCode || null,
+        };
+        await db.query(
+          `UPDATE payments
+              SET provider_transaction_id = ?
+            WHERE id = ?`,
+          [JSON.stringify(posMeta), job.payment_id]
+        );
+      }
   // Default: dacă job-ul a eșuat, plata devine FAILED (Așa ai ales tu pentru CASH)
   let paymentStatus = success ? null : 'failed';
   let receiptStatus = 'none';
