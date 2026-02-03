@@ -24,13 +24,10 @@ export default function SiteFooter() {
             ))}
           </div>
           <p>
-            Pentru sesizări rapide ne poți scrie la{' '}
+            Pentru sesizări ne poți scrie la{' '}
             <a href="mailto:rezervari@pris-com.ro" className="text-white hover:text-brand font-medium">
               rezervari@pris-com.ro
-            </a>{' '}sau la telefon{' '}
-            <a href="tel:0740470996" className="text-white hover:text-brand font-medium">
-              0740 470 996
-            </a>.
+            </a>{' '}
           </p>
         </div>
 
@@ -51,21 +48,21 @@ export default function SiteFooter() {
                 rel="noreferrer"
                 className="hover:text-brand"
               >
-                Link ANPC / SOL
+                ANPC / SOL
               </a>
             </li>
           </ul>
           <div>
             <h3 className="text-base font-semibold text-white">Plăți securizate eBTpay</h3>
             <p className="mt-2">
-              E-shopul nu stochează datele cardului. Tranzacțiile sunt securizate și monitorizate de Banca Transilvania.
-            </p>
+              Nu stocăm datele cardului.</p> <p>Tranzacțiile sunt securizate și monitorizate de Banca Transilvania.</p>
+            
             <CardBrandLogos size="md" className="mt-4" />
           </div>
         </div>
       </div>
       <div className="border-t border-white/10 px-4 py-4 text-center text-xs text-white/60">
-        © {new Date().getFullYear()} Pris Com. Toate drepturile rezervate.
+        © {new Date().getFullYear()} Pris Com & Auto Dimas. Toate drepturile rezervate.
       </div>
     </footer>
   )

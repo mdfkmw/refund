@@ -514,7 +514,7 @@ export default function Page() {
           <div>
             <h2 className="text-2xl md:text-3xl font-bold">Trasee disponibile</h2>
             <p className="text-white/70 text-sm md:text-base">
-              Traseele pe care le poți rezerva direct online.
+              Traseele pe care poți rezerva locuri direct online.
             </p>
           </div>
           <div className="text-sm text-white/60">

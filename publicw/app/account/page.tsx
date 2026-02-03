@@ -8,6 +8,7 @@ import Navbar from '@/components/Navbar'
 import { usePublicSession } from '@/components/PublicSessionProvider'
 import {
   fetchAccountReservations,
+  refundPublicOrder,
   updatePublicProfile,
   type AccountReservation,
   type AccountReservationsResponse,
@@ -59,9 +60,15 @@ function getStatusMeta(status: string | null | undefined): StatusMeta {
 function ReservationCard({
   reservation,
   fallbackPassengerName,
+  refundState,
+  onRefund,
+  showRefundAction,
 }: {
   reservation: AccountReservation
   fallbackPassengerName: string
+  refundState?: { status: 'idle' | 'pending' | 'success' | 'error'; message?: string }
+  onRefund?: (orderId: number) => void
+  showRefundAction?: boolean
 }) {
   const statusMeta = getStatusMeta(reservation.status)
   const passengerName = reservation.passenger_name?.trim() || fallbackPassengerName
@@ -72,11 +79,14 @@ function ReservationCard({
   const priceValue = reservation.price_value != null ? Number(reservation.price_value) : null
   const discountValue = reservation.discount_total != null ? Number(reservation.discount_total) : 0
   const paidValue = reservation.paid_amount != null ? Number(reservation.paid_amount) : 0
+  const isRefunded = reservation.is_refunded
   const dueValue = priceValue != null ? Number((priceValue - paidValue).toFixed(2)) : null
   const showDiscount = discountValue > 0
   const showPaid = paidValue > 0
-  const showDue = dueValue != null && dueValue > 0.01
+  const showDue = !isRefunded && dueValue != null && dueValue > 0.01
   const reservationDateLabel = reservation.reservation_time ? formatRoDate(reservation.reservation_time) : null
+  const canRefund = Boolean(showRefundAction && reservation.order_id && reservation.is_paid && !isRefunded)
+  const refundStatus = refundState?.status || 'idle'
 
   return (
     <article className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur p-5 md:p-6 space-y-5">
@@ -151,6 +161,10 @@ function ReservationCard({
             <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-emerald-200">
               Plătit integral
             </div>
+          ) : reservation.is_refunded ? (
+            <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-rose-200">
+              Refundat
+            </div>
           ) : showDue ? (
             <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-amber-200">
               Plata se achită la îmbarcare
@@ -158,6 +172,27 @@ function ReservationCard({
           ) : null}
         </div>
       </div>
+
+      {(canRefund || (showRefundAction && refundStatus !== 'idle')) && (
+        <div className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/70">
+          {canRefund && (
+            <button
+              type="button"
+              onClick={() => reservation.order_id && onRefund?.(reservation.order_id)}
+              disabled={refundStatus === 'pending'}
+              className="inline-flex items-center justify-center rounded-lg border border-rose-400/20 bg-transparent px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-rose-100/80 transition hover:bg-rose-500/10 hover:text-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {refundStatus === 'pending' ? 'Se procesează refund-ul...' : 'Anulează și cere refund'}
+            </button>
+          )}
+          {refundStatus === 'success' && (
+            <p className="text-emerald-200">{refundState?.message || 'Refund-ul a fost solicitat cu succes.'}</p>
+          )}
+          {refundStatus === 'error' && (
+            <p className="text-rose-200">{refundState?.message || 'Refund-ul nu a putut fi procesat.'}</p>
+          )}
+        </div>
+      )}
     </article>
   )
 }
@@ -174,6 +209,7 @@ function AccountPageContent() {
   const [profileSubmitting, setProfileSubmitting] = useState(false)
   const [profileError, setProfileError] = useState<string | null>(null)
   const [profileSuccess, setProfileSuccess] = useState<string | null>(null)
+  const [refundState, setRefundState] = useState<Record<number, { status: 'idle' | 'pending' | 'success' | 'error'; message?: string }>>({})
 
   const needsContactUpdate = searchParams?.get('missing') === 'contact'
 
@@ -267,7 +303,7 @@ function AccountPageContent() {
   const pastReservations = reservations?.past ?? []
   const initialLoading = reservationsLoading && !reservations
 
-  const renderReservationGroup = (items: AccountReservation[], emptyMessage: string) => {
+  const renderReservationGroup = (items: AccountReservation[], emptyMessage: string, showRefundAction = false) => {
     if (!items.length) {
       if (initialLoading && !reservationsError) {
         return <p className="text-sm text-white/60">Se încarcă rezervările...</p>
@@ -281,10 +317,37 @@ function AccountPageContent() {
             key={reservation.id}
             reservation={reservation}
             fallbackPassengerName={displayName}
+            refundState={reservation.order_id ? refundState[reservation.order_id] : undefined}
+            onRefund={(orderId) => handleRefund(orderId)}
+            showRefundAction={showRefundAction}
           />
         ))}
       </div>
     )
+  }
+
+  const handleRefund = async (orderId: number) => {
+    if (!window.confirm('Ești sigur că vrei să anulezi rezervarea și să ceri refund?')) {
+      return
+    }
+    setRefundState((prev) => ({
+      ...prev,
+      [orderId]: { status: 'pending' },
+    }))
+    try {
+      const response = await refundPublicOrder(orderId)
+      setRefundState((prev) => ({
+        ...prev,
+        [orderId]: { status: 'success', message: response.message },
+      }))
+      await loadReservations()
+    } catch (err: any) {
+      const message = err?.message || 'Refund-ul nu a putut fi procesat.'
+      setRefundState((prev) => ({
+        ...prev,
+        [orderId]: { status: 'error', message },
+      }))
+    }
   }
 
   return (
@@ -402,7 +465,7 @@ function AccountPageContent() {
               <span className="text-xs uppercase tracking-wide text-white/50">Se actualizează…</span>
             )}
           </div>
-          {renderReservationGroup(upcomingReservations, 'Nu ai rezervări viitoare în acest moment.')}
+          {renderReservationGroup(upcomingReservations, 'Nu ai rezervări viitoare în acest moment.', true)}
         </section>
 
         <section className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur px-5 py-6 space-y-4">
