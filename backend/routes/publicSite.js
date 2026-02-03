@@ -1482,22 +1482,48 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
       }
     }
 
-    const whereParts = [];
-    const params = [];
+    const baseWhereParts = [];
+    const baseParams = [];
 
     if (personIds.length) {
       const personPlaceholders = personIds.map(() => '?').join(',');
-      whereParts.push(`r.person_id IN (${personPlaceholders})`);
-      params.push(...personIds);
+      baseWhereParts.push(`r.person_id IN (${personPlaceholders})`);
+      baseParams.push(...personIds);
     }
 
     for (const variant of phoneVariants) {
-      whereParts.push('r.observations LIKE ?');
-      params.push(`%Telefon: ${variant}%`);
+      baseWhereParts.push('r.observations LIKE ?');
+      baseParams.push(`%Telefon: ${variant}%`);
     }
 
-    if (!whereParts.length) {
+    if (!baseWhereParts.length) {
       return res.json({ upcoming: [], past: [] });
+    }
+
+    const orderIdRows = await db.query(
+      `
+      SELECT DISTINCT p.order_id
+      FROM reservations r
+      LEFT JOIN payments p ON p.reservation_id = r.id
+      WHERE (${baseWhereParts.join(' OR ')})
+        AND p.order_id IS NOT NULL
+      `,
+      baseParams,
+    );
+    const orderIds = [];
+    for (const row of orderIdRows.rows || []) {
+      const orderId = Number(row.order_id);
+      if (Number.isFinite(orderId)) {
+        orderIds.push(orderId);
+      }
+    }
+
+    const whereParts = [...baseWhereParts];
+    const params = [...baseParams];
+    if (orderIds.length) {
+      const orderPlaceholders = orderIds.map(() => '?').join(',');
+      whereParts.push(`payments.order_id IN (${orderPlaceholders})`);
+      params.push(...orderIds);
     }
 
     const sql = `
@@ -1565,14 +1591,19 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
 
     const { rows } = await db.query(sql, params);
 
-    const seen = new Set();
+    const groups = new Map();
     const upcoming = [];
     const past = [];
 
+    const pushUnique = (list, value) => {
+      if (!value) return;
+      if (list.includes(value)) return;
+      list.push(value);
+    };
+
     for (const row of rows || []) {
       const id = Number(row.id);
-      if (!Number.isFinite(id) || seen.has(id)) continue;
-      seen.add(id);
+      if (!Number.isFinite(id)) continue;
 
       const tripIdValue = row.trip_id == null ? null : Number(row.trip_id);
       const boardStationIdValue = row.board_station_id == null ? null : Number(row.board_station_id);
@@ -1584,38 +1615,63 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
       const isPaid = Number(row.has_paid) === 1;
       const orderId = Number.isFinite(Number(row.order_id)) ? Number(row.order_id) : null;
       const isRefunded = Number(row.has_refunded) === 1;
+      const groupKey = orderId ?? id;
 
-      const entry = {
-        id,
-        trip_id: Number.isFinite(tripIdValue) ? tripIdValue : null,
-        status: row.status || 'pending',
-        reservation_time: row.reservation_time || null,
-        trip_date: row.trip_date || null,
-        trip_time: row.trip_time || null,
-        travel_datetime: row.trip_date ? `${row.trip_date}T${row.trip_time || '00:00'}` : null,
-        route_name: row.route_name || null,
-        direction: row.direction || null,
-        seat_label: row.seat_label || null,
-        board_station_id: Number.isFinite(boardStationIdValue) ? boardStationIdValue : null,
-        exit_station_id: Number.isFinite(exitStationIdValue) ? exitStationIdValue : null,
-        board_name: row.board_name || null,
-        exit_name: row.exit_name || null,
-        passenger_name: row.passenger_name || null,
-        price_value: priceValue,
-        discount_total: discountTotal,
-        paid_amount: paidAmount,
-        payment_method: row.payment_method || null,
-        is_paid: isPaid,
-        order_id: orderId,
-        is_refunded: isRefunded,
-        currency: 'RON',
-      };
+      let entry = groups.get(groupKey);
+      if (!entry) {
+        entry = {
+          id: groupKey,
+          trip_id: Number.isFinite(tripIdValue) ? tripIdValue : null,
+          status: row.status || 'pending',
+          reservation_time: row.reservation_time || null,
+          trip_date: row.trip_date || null,
+          trip_time: row.trip_time || null,
+          travel_datetime: row.trip_date ? `${row.trip_date}T${row.trip_time || '00:00'}` : null,
+          route_name: row.route_name || null,
+          direction: row.direction || null,
+          seat_label: row.seat_label || null,
+          seat_labels: [],
+          board_station_id: Number.isFinite(boardStationIdValue) ? boardStationIdValue : null,
+          exit_station_id: Number.isFinite(exitStationIdValue) ? exitStationIdValue : null,
+          board_name: row.board_name || null,
+          exit_name: row.exit_name || null,
+          passenger_name: row.passenger_name || null,
+          passenger_names: [],
+          reservation_ids: [],
+          price_value: priceValue != null ? priceValue : null,
+          discount_total: discountTotal,
+          paid_amount: paidAmount,
+          payment_method: row.payment_method || null,
+          is_paid: isPaid,
+          order_id: orderId,
+          is_refunded: isRefunded,
+          currency: 'RON',
+        };
 
-      if (isPast) {
-        past.push(entry);
+        groups.set(groupKey, entry);
+
+        if (isPast) {
+          past.push(entry);
+        } else {
+          upcoming.push(entry);
+        }
       } else {
-        upcoming.push(entry);
+        if (priceValue != null) {
+          entry.price_value = Number(((entry.price_value ?? 0) + priceValue).toFixed(2));
+        }
+        entry.discount_total = Number(((entry.discount_total ?? 0) + discountTotal).toFixed(2));
+        entry.paid_amount = Number(((entry.paid_amount ?? 0) + paidAmount).toFixed(2));
+        entry.is_paid = entry.is_paid && isPaid;
+        entry.is_refunded = entry.is_refunded || isRefunded;
+        entry.payment_method = entry.payment_method || row.payment_method || null;
+        entry.order_id = entry.order_id ?? orderId;
+        entry.seat_label = entry.seat_label || row.seat_label || null;
+        entry.passenger_name = entry.passenger_name || row.passenger_name || null;
       }
+
+      entry.reservation_ids.push(id);
+      pushUnique(entry.seat_labels, row.seat_label || null);
+      pushUnique(entry.passenger_names, row.passenger_name || null);
     }
 
     res.json({ upcoming, past });

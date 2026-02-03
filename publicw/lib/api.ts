@@ -196,11 +196,14 @@ export interface AccountReservation {
   route_name: string | null;
   direction: string | null;
   seat_label: string | null;
+  seat_labels?: string[];
   board_station_id: number | null;
   exit_station_id: number | null;
   board_name: string | null;
   exit_name: string | null;
   passenger_name: string | null;
+  passenger_names?: string[];
+  reservation_ids?: number[];
   price_value: number | null;
   discount_total: number | null;
   paid_amount: number | null;

@@ -72,6 +72,20 @@ function ReservationCard({
 }) {
   const statusMeta = getStatusMeta(reservation.status)
   const passengerName = reservation.passenger_name?.trim() || fallbackPassengerName
+  const passengerNames = (reservation.passenger_names || [])
+    .map((name) => name?.trim())
+    .filter((name): name is string => Boolean(name))
+  if (!passengerNames.length && passengerName) {
+    passengerNames.push(passengerName)
+  }
+  const seatLabels = (reservation.seat_labels || [])
+    .map((label) => label?.trim())
+    .filter((label): label is string => Boolean(label))
+  if (!seatLabels.length && reservation.seat_label) {
+    seatLabels.push(reservation.seat_label)
+  }
+  const isMultiPassenger = passengerNames.length > 1
+  const isMultiSeat = seatLabels.length > 1
   const tripDateSource = reservation.trip_date ? `${reservation.trip_date}T00:00:00` : reservation.travel_datetime
   const formattedDate = tripDateSource ? formatRoDate(tripDateSource) : '—'
   const timeLabel = formatTimeLabel(reservation.trip_time)
@@ -113,14 +127,14 @@ function ReservationCard({
         <div className="space-y-4 text-sm text-white/70">
           <div className="flex flex-wrap items-center gap-3">
             <span>
-              Pasager:{' '}
-              <span className="font-semibold text-white">{passengerName}</span>
+              {isMultiPassenger ? 'Pasageri:' : 'Pasager:'}{' '}
+              <span className="font-semibold text-white">{passengerNames.join(', ')}</span>
             </span>
             <span>
-              Loc:{' '}
-              <span className="font-semibold text-white">{reservation.seat_label || '—'}</span>
+              {isMultiSeat ? 'Locuri:' : 'Loc:'}{' '}
+              <span className="font-semibold text-white">{seatLabels.join(', ') || '—'}</span>
             </span>
-            <span className="text-white/40 text-xs uppercase tracking-wide">ID #{reservation.id}</span>
+            <span className="text-white/40 text-xs uppercase tracking-wide">ID #{reservation.order_id ?? reservation.id}</span>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
