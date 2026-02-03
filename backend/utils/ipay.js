@@ -42,6 +42,37 @@ function toForm(params) {
 async function postForm(path, params, override) {
   const url = `${resolveBaseUrl(override)}${path.startsWith('/') ? '' : '/'}${path}`;
 
+    // ===== DEBUG IPAY (TEMPORAR) =====
+  if (path === '/register.do' || path === '/registerPreAuth.do') {
+    const safe = { ...params };
+
+    // mascăm date sensibile în log
+    if (safe.email) {
+      safe.email = String(safe.email).replace(/(.{2}).+(@.*)/, '$1***$2');
+    }
+
+if (safe.orderBundle) {
+  try {
+    safe.orderBundle = JSON.stringify(
+      JSON.parse(String(safe.orderBundle)),
+      null,
+      2
+    );
+  } catch (e) {
+    // fallback dacă nu e JSON valid (nu ar trebui, dar e safe)
+    safe.orderBundle = String(safe.orderBundle);
+  }
+}
+
+
+
+    console.log('------------------------------------------------');
+    console.log('[IPAY][OUTGOING]', path, safe);
+    console.log('------------------------------------------------');
+  }
+  // ===== END DEBUG IPAY =====
+
+
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -67,7 +98,20 @@ async function postForm(path, params, override) {
   return data;
 }
 
-async function registerDo({ orderNumber, amountMinor, currency = 946, returnUrl, description }, override) {
+async function registerDo(
+  {
+    orderNumber,
+    amountMinor,
+    currency = 946,
+    returnUrl,
+    description,
+    email,
+    orderBundle,
+    sessionTimeoutSecs = 420, // expira in ... secunde 
+  },
+  override
+) {
+
   // register.do (1-phase)
   return postForm('/register.do', {
     orderNumber,
@@ -75,7 +119,11 @@ async function registerDo({ orderNumber, amountMinor, currency = 946, returnUrl,
     currency,
     returnUrl,
     description,
+    email,
+    sessionTimeoutSecs,
+    orderBundle: orderBundle ? JSON.stringify(orderBundle) : undefined,
   }, override);
+
 }
 
 async function getOrderStatusExtendedDo({ orderId }, override) {

@@ -2602,11 +2602,13 @@ router.post('/orders/:orderId/start-payment', async (req, res) => {
     const { rows: orderRows } = await execQuery(
       conn,
       `
-      SELECT id, trip_id, operator_id, payment_provider, total_amount, status,
-             expires_at, customer_name, customer_phone, customer_email
-        FROM orders
-       WHERE id = ?
-       LIMIT 1
+SELECT id, trip_id, operator_id, payment_provider, total_amount, status,
+       expires_at, customer_name, customer_phone, customer_email,
+       board_station_id, exit_station_id
+  FROM orders
+ WHERE id = ?
+ LIMIT 1
+
       `,
       [orderId],
     );
@@ -2638,7 +2640,7 @@ router.post('/orders/:orderId/start-payment', async (req, res) => {
         `
     UPDATE orders
        SET status = 'pending',
-           expires_at = DATE_ADD(NOW(), INTERVAL 10 MINUTE)
+           expires_at = DATE_ADD(NOW(), INTERVAL 7 MINUTE)
      WHERE id = ?
        AND status = 'failed'
     `,
@@ -2658,7 +2660,7 @@ router.post('/orders/:orderId/start-payment', async (req, res) => {
     }
 
 
-    // Expirare comanda (hold 10 min)
+    // Expirare comanda (hold 7 min)
     const { rows: expRows } = await execQuery(
       conn,
       `SELECT (expires_at <= NOW()) AS expired FROM orders WHERE id = ? LIMIT 1`,
@@ -2699,7 +2701,11 @@ router.post('/orders/:orderId/start-payment', async (req, res) => {
     }
     const returnUrl = `${publicBaseUrl.replace(/\/$/, '')}/api/public/ipay/return?order_id=${orderId}`;
 
-    const orderNumber = `ORDER-${orderId}-${Date.now()}`;
+    const ts = Date.now().toString().slice(-8); // ultimele 8 cifre
+    const orderNumber = `ORD-${orderId}-${ts}`.slice(0, 32);
+
+    // asigură-te că e <= 32
+
 
     const description = `Bilet online (${orderNumber})`;
 
@@ -2710,11 +2716,78 @@ router.post('/orders/:orderId/start-payment', async (req, res) => {
 
 
 
+    // --- iPay PSD2: oras imbarcare din DB, fara fallback ---
+    const cleanEmail = String(order.customer_email || '').trim();
+    const rawPhone = String(order.customer_phone || '').replace(/\D+/g, '');
+
+    const cleanPhone = rawPhone.startsWith('0')
+      ? '4' + rawPhone
+      : rawPhone.startsWith('7')
+        ? '40' + rawPhone
+        : rawPhone;
+
+
+    // luam orasul statiei de imbarcare
+    const { rows: boardRows } = await execQuery(
+      conn,
+      `
+    SELECT name AS board_city
+      FROM stations
+     WHERE id = ?
+     LIMIT 1
+  `,
+      [order.board_station_id],
+    );
+
+    const rawCity = String(boardRows?.[0]?.board_city || '').trim();
+    if (!rawCity) {
+      conn.release();
+      return res.status(409).json({ error: 'Lipsește orașul de îmbarcare pentru orderBundle (stations.name).' });
+    }
+
+    const boardCity = rawCity
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') // fara diacritice
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+
+    const orderBundle = {
+      // in doc/exemple e YYYY-MM-DD (nu Date.now)
+      orderCreationDate: new Date().toISOString().slice(0, 10),
+      customerDetails: {
+        email: cleanEmail,
+        phone: cleanPhone,
+        deliveryInfo: {
+          deliveryType: 'DIGITAL',
+          country: 642,
+          city: boardCity,
+          postAddress: 'Bilet electronic',
+        },
+        billingInfo: {
+          country: 642,
+          city: boardCity,
+          postAddress: 'Bilet electronic',
+        },
+      },
+    };
+
+
     const ipayRes = await registerDo(
-      { orderNumber, amountMinor, currency: 946, returnUrl, description },
+      {
+        orderNumber,
+        amountMinor,
+        currency: 946,
+        returnUrl,
+        description,
+        email: String(order.customer_email || '').trim(),
+        orderBundle,
+        sessionTimeoutSecs: 420,
+      },
       override,
     );
 
+    console.log('[IPAY][register][response]', ipayRes);
 
 
 
@@ -2824,8 +2897,10 @@ router.get('/ipay/return', async (req, res) => {
     const statusRes = await getOrderStatusExtendedDo({ orderId: ipayOrderId }, override);
 
     // iPay: actionCode == 0 => success (in practica)
-    const actionCode = Number(statusRes?.actionCode ?? statusRes?.actionCodeDescription ?? statusRes?.orderStatus ?? -1);
+    const actionCode = Number(statusRes?.actionCode ?? -1);
     const orderStatus = Number(statusRes?.orderStatus ?? -1);
+
+
     const isPaid = actionCode === 0 || orderStatus === 2; // 2 = DEPOSITED/PAID (observat frecvent la iPay)
 
     if (!isPaid) {
