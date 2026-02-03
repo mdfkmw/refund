@@ -1482,22 +1482,48 @@ router.get('/account/reservations', requirePublicAuth, async (req, res) => {
       }
     }
 
-    const whereParts = [];
-    const params = [];
+    const baseWhereParts = [];
+    const baseParams = [];
 
     if (personIds.length) {
       const personPlaceholders = personIds.map(() => '?').join(',');
-      whereParts.push(`r.person_id IN (${personPlaceholders})`);
-      params.push(...personIds);
+      baseWhereParts.push(`r.person_id IN (${personPlaceholders})`);
+      baseParams.push(...personIds);
     }
 
     for (const variant of phoneVariants) {
-      whereParts.push('r.observations LIKE ?');
-      params.push(`%Telefon: ${variant}%`);
+      baseWhereParts.push('r.observations LIKE ?');
+      baseParams.push(`%Telefon: ${variant}%`);
     }
 
-    if (!whereParts.length) {
+    if (!baseWhereParts.length) {
       return res.json({ upcoming: [], past: [] });
+    }
+
+    const orderIdRows = await db.query(
+      `
+      SELECT DISTINCT p.order_id
+      FROM reservations r
+      LEFT JOIN payments p ON p.reservation_id = r.id
+      WHERE (${baseWhereParts.join(' OR ')})
+        AND p.order_id IS NOT NULL
+      `,
+      baseParams,
+    );
+    const orderIds = [];
+    for (const row of orderIdRows.rows || []) {
+      const orderId = Number(row.order_id);
+      if (Number.isFinite(orderId)) {
+        orderIds.push(orderId);
+      }
+    }
+
+    const whereParts = [...baseWhereParts];
+    const params = [...baseParams];
+    if (orderIds.length) {
+      const orderPlaceholders = orderIds.map(() => '?').join(',');
+      whereParts.push(`payments.order_id IN (${orderPlaceholders})`);
+      params.push(...orderIds);
     }
 
     const sql = `
