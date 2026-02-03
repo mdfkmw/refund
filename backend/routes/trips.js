@@ -244,6 +244,30 @@ router.get('/summary', async (_req, res) => {
   }
 });
 
+
+
+async function isScheduleDisabledForDate(scheduleId, dateStr) {
+  // dateStr = 'YYYY-MM-DD'
+  // MariaDB: DAYOFWEEK('YYYY-MM-DD') -> 1..7, noi vrem 0..6 ca în codul tău => -1
+  const { rows } = await db.query(
+    `
+    SELECT 1
+      FROM schedule_exceptions se
+     WHERE se.schedule_id = ?
+       AND se.disable_run = 1
+       AND (
+            se.exception_date IS NULL
+         OR se.exception_date = DATE(?)
+         OR se.weekday = (DAYOFWEEK(DATE(?)) - 1)
+       )
+     LIMIT 1
+    `,
+    [scheduleId, dateStr, dateStr]
+  );
+
+  return rows.length > 0;
+}
+
 // ================================================================
 // GET /api/trips/find
 // Găsește sau creează automat o cursă (trip)
@@ -302,73 +326,102 @@ router.get('/find', async (req, res) => {
       //console.log('[trips/find] schedule by id:', { scheduleId, operator_id, time });
     }
 
-    // verifică dacă există deja cursa
-    const { rows: findRes } = await db.query(
-      `SELECT
-          t.id,
-          t.route_id,
-          pv.vehicle_id,
-          t.date,
-          TIME_FORMAT(t.time, '%H:%i') AS time,
-          t.disabled,
-          COALESCE(pv.boarding_started, 0) AS boarding_started
-        FROM trips t
-         LEFT JOIN trip_vehicles pv ON pv.trip_id = t.id AND pv.is_primary = 1
-        WHERE t.route_schedule_id = ?
-          AND t.date = DATE(?)
-          AND TIME(t.time) = TIME(?)
-          AND t.disabled = 0
-        LIMIT 1`,
-      [scheduleId, date, time5]
-    );
-    //console.log('[trips/find] existing trip count =', findRes.length, 'for', { scheduleId, date });
-    if (findRes.length) {
-      //console.log('[trips/find] return existing trip id=', findRes[0]?.id);
-      return res.json(normalizeBoardingFlags(findRes)[0]);
+    // 0) Dacă programarea e dezactivată prin excepții pentru data asta, NU creăm trip.
+    const disabledByRule = await isScheduleDisabledForDate(scheduleId, date);
+    if (disabledByRule) {
+      console.log('[trips/find] schedule disabled by rule:', { scheduleId, date, time: time5 });
+      return res.status(409).json({
+        error: 'Cursa este dezactivată pentru această dată (regulă de excepție).'
+      });
     }
 
+    // 1) Caută trip-ul existent (indiferent de disabled)
+    const { rows: anyTripRes } = await db.query(
+      `SELECT
+      t.id,
+      t.route_id,
+      pv.vehicle_id,
+      t.date,
+      TIME_FORMAT(t.time, '%H:%i') AS time,
+      t.disabled,
+      COALESCE(pv.boarding_started, 0) AS boarding_started
+    FROM trips t
+     LEFT JOIN trip_vehicles pv ON pv.trip_id = t.id AND pv.is_primary = 1
+    WHERE t.route_schedule_id = ?
+      AND t.date = DATE(?)
+      AND TIME(t.time) = TIME(?)
+    LIMIT 1`,
+      [scheduleId, date, time5]
+    );
+
+    if (anyTripRes.length) {
+      const existing = normalizeBoardingFlags(anyTripRes)[0];
+
+      // dacă e disabled => nu creăm altul
+      if (existing.disabled) {
+        console.log('[trips/find] trip exists but disabled:', {
+          tripId: existing.id,
+          scheduleId,
+          date,
+          time: time5
+        });
+        return res.status(409).json({
+          error: 'Cursa este dezactivată (trip disabled).'
+        });
+      }
+
+      // dacă e activ => îl returnăm
+      return res.json(existing);
+    }
+
+    // 2) Nu există deloc trip => rezolvăm vehicul default
     const defaultVehicleId = await resolveDefaultVehicleId(scheduleId, operator_id);
     if (!defaultVehicleId) {
       console.log('[trips/find] NO default vehicle for operator', operator_id, 'schedule', scheduleId);
       return res.status(404).json({ error: 'Vehicul default inexistent' });
     }
-console.log('[trips/find] default vehicle:', defaultVehicleId);
-    // inserăm noul trip
+    console.log('[trips/find] default vehicle:', defaultVehicleId);
+
+    // 3) INSERT atomic (safe la concurență)
     const ins = await db.query(
-      `INSERT INTO trips
-         (route_schedule_id, route_id, date, time)
-       VALUES (?, ?, ?, TIME(?))`,
+      `INSERT INTO trips (route_schedule_id, route_id, date, time, disabled)
+   VALUES (?, ?, ?, TIME(?), 0)
+   ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
       [scheduleId, route_id, date, time5]
     );
-    const insertId = ins.insertId;
-console.log('[trips/find] inserted trip id=', insertId);
 
-    // citim trip-ul inserat după ID (safe în concurență)
-    // populăm trip_vehicles
+    const tripId = ins.insertId;
+    console.log('[trips/find] ensured trip id=', tripId);
+
+    // 4) Asigură perechea în trip_vehicles (primar)
     await db.query(
       `INSERT INTO trip_vehicles (trip_id, vehicle_id, is_primary)
-       VALUES (?, ?, 1)
-       ON DUPLICATE KEY UPDATE is_primary = VALUES(is_primary)`,
-      [insertId, defaultVehicleId]
+   VALUES (?, ?, 1)
+   ON DUPLICATE KEY UPDATE is_primary = VALUES(is_primary)`,
+      [tripId, defaultVehicleId]
     );
-console.log('[trips/find] ensured trip_vehicles pair:', { trip_id: insertId, vehicle_id: defaultVehicleId });
+    console.log('[trips/find] ensured trip_vehicles pair:', { trip_id: tripId, vehicle_id: defaultVehicleId });
 
-    const { rows: tripRows} = await db.query(
+    // 5) Citește și returnează trip-ul final
+    const { rows: tripRows } = await db.query(
       `SELECT
-          t.id,
-          t.route_id,
-          pv.vehicle_id,
-          t.date,
-          TIME_FORMAT(t.time, '%H:%i') AS time,
-          t.disabled,
-          COALESCE(pv.boarding_started, 0) AS boarding_started
-         FROM trips t
-         LEFT JOIN trip_vehicles pv ON pv.trip_id = t.id AND pv.is_primary = 1
-        WHERE t.id = ?`,
-      [insertId]
+      t.id,
+      t.route_id,
+      pv.vehicle_id,
+      t.date,
+      TIME_FORMAT(t.time, '%H:%i') AS time,
+      t.disabled,
+      COALESCE(pv.boarding_started, 0) AS boarding_started
+    FROM trips t
+     LEFT JOIN trip_vehicles pv ON pv.trip_id = t.id AND pv.is_primary = 1
+    WHERE t.id = ?
+    LIMIT 1`,
+      [tripId]
     );
+
     const trip = normalizeBoardingFlags(tripRows)[0];
-    res.json(trip);
+    return res.json(trip);
+
   } catch (err) {
     console.error('Eroare la găsire/creare trip:', err);
     res.status(500).json({ error: 'Eroare internă' });
@@ -403,7 +456,12 @@ router.patch('/:id/vehicle', async (req, res) => {
     }
     const oldVehicleId = tripRows[0].vehicle_id;
     if (!Number.isInteger(Number(oldVehicleId))) {
-      return res.status(409).json({ error: 'Cursa nu are vehicul principal configurat.' });
+      return res.status(409).json({
+        error: 'Cursa este dezactivată (trip disabled).',
+        code: 'TRIP_DISABLED',
+        trip_id: existing.id
+      });
+
     }
 
     // 2. Ia rezervările active pe cursa asta și vehiculul vechi
@@ -488,28 +546,28 @@ router.patch('/:id/vehicle', async (req, res) => {
       conn.release();
       return res.json({ success: true });
     } catch (err) {
-    await conn.rollback();
-    conn.release();
-    console.error('[PATCH /api/trips/:id/vehicle] TX error:', err);
+      await conn.rollback();
+      conn.release();
+      console.error('[PATCH /api/trips/:id/vehicle] TX error:', err);
+      const status = err?.code === 'ER_DUP_ENTRY' ? 409 : 500;
+      return res.status(status).json({
+        error: 'Eroare la migrarea rezervărilor.',
+        code: err?.code || null,
+        sqlState: err?.sqlState || null,
+        sqlMessage: err?.sqlMessage || err?.message || null,
+        sql: err?.sql || null
+      });
+    }
+  } catch (err) {
+    console.error('[PATCH /api/trips/:id/vehicle] error:', err);
     const status = err?.code === 'ER_DUP_ENTRY' ? 409 : 500;
-    return res.status(status).json({
-      error: 'Eroare la migrarea rezervărilor.',
+    res.status(status).json({
+      error: 'Eroare internă',
       code: err?.code || null,
       sqlState: err?.sqlState || null,
       sqlMessage: err?.sqlMessage || err?.message || null,
       sql: err?.sql || null
     });
-    }
-  } catch (err) {
-  console.error('[PATCH /api/trips/:id/vehicle] error:', err);
-  const status = err?.code === 'ER_DUP_ENTRY' ? 409 : 500;
-  res.status(status).json({
-    error: 'Eroare internă',
-    code: err?.code || null,
-    sqlState: err?.sqlState || null,
-    sqlMessage: err?.sqlMessage || err?.message || null,
-    sql: err?.sql || null
-  });
   }
 });
 
@@ -523,7 +581,7 @@ router.post('/autogenerate', async (req, res) => {
 
   try {
     let insertedTrips = 0;
-    let insertedTV    = 0;
+    let insertedTV = 0;
 
     for (let d = 0; d < 7; d++) {
       const curr = new Date(startDate);
@@ -557,13 +615,13 @@ router.post('/autogenerate', async (req, res) => {
       );
 
 
-      
-            // 2️⃣ pentru fiecare program – creează / sincronizează trip + vehicul
+
+      // 2️⃣ pentru fiecare program – creează / sincronizează trip + vehicul
       for (const s of schedules) {
         // Flag-urile de vizibilitate din routes (TINYINT → boolean)
         const visibleInReservations = parseBooleanFlag(s.visible_in_reservations);
-        const visibleForDrivers     = parseBooleanFlag(s.visible_for_drivers);
-        const visibleOnline        = parseBooleanFlag(s.visible_online);
+        const visibleForDrivers = parseBooleanFlag(s.visible_for_drivers);
+        const visibleOnline = parseBooleanFlag(s.visible_online);
 
         // Ruta este "cu rezervări" dacă:
         // - apare în aplicația de agenți SAU
@@ -717,7 +775,7 @@ router.post('/autogenerate', async (req, res) => {
     }
 
     res.json({
-      status:   'ok',
+      status: 'ok',
       inserted: { trips: insertedTrips, trip_vehicles: insertedTV }
     });
   } catch (err) {
@@ -827,7 +885,7 @@ router.post('/exceptions/update', async (req, res) => {
               disable_run, disable_online, created_by_employee_id)
            VALUES (?, ?, ?, ?, ?, ?)`,
           [schedule_id, exception_date, weekday,
-           disableRunVal, disableOnlineVal, createdBy]
+            disableRunVal, disableOnlineVal, createdBy]
         );
         ruleId = ins.insertId;
       }

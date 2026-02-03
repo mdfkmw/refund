@@ -82,7 +82,12 @@ async function getOrderStatusExtendedDo({ orderId }, override) {
   return postForm('/getOrderStatusExtended.do', { orderId }, override);
 }
 
+async function refundDo({ orderId, amountMinor }, override) {
+  return postForm('/refund.do', { orderId, amount: amountMinor }, override);
+}
+
 module.exports = {
   registerDo,
   getOrderStatusExtendedDo,
+  refundDo,
 };

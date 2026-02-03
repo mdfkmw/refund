@@ -1351,9 +1351,9 @@ router.post('/:id/payments/cash-agent', async (req, res) => {
     const employeeId = Number(req.body?.employeeId || req.user?.id || 0) || null;
 
     const terminalId = Number(req.user?.terminal_id);
-if (!terminalId) {
-  return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
-}
+    if (!terminalId) {
+      return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
+    }
     if (await rejectIfActiveAgentJob(req, res)) return;
 
 
@@ -1454,10 +1454,10 @@ if (!terminalId) {
     );
 
     req.app
-  .get('io')
-  ?.of('/agent')
-  ?.to(`terminal:${terminalId}`)
-  ?.emit('agent:wakeup');
+      .get('io')
+      ?.of('/agent')
+      ?.to(`terminal:${terminalId}`)
+      ?.emit('agent:wakeup');
 
 
     const jobId = jobIns.insertId;
@@ -1491,9 +1491,9 @@ router.post('/:id/payments/card-agent', async (req, res) => {
     const employeeId = Number(req.body?.employeeId || req.user?.id || 0) || null;
 
     const terminalId = Number(req.user?.terminal_id);
-if (!terminalId) {
-  return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
-}
+    if (!terminalId) {
+      return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
+    }
     if (await rejectIfActiveAgentJob(req, res)) return;
 
 
@@ -1582,6 +1582,7 @@ if (!terminalId) {
     const payload = {
       reservation_id: reservationId,
       payment_id: paymentId,
+      pos_unique_id: paymentId,
       amount,
       currency: 'RON',
       description: desc,
@@ -1611,10 +1612,10 @@ if (!terminalId) {
     );
 
     req.app
-  .get('io')
-  ?.of('/agent')
-  ?.to(`terminal:${terminalId}`)
-  ?.emit('agent:wakeup');
+      .get('io')
+      ?.of('/agent')
+      ?.to(`terminal:${terminalId}`)
+      ?.emit('agent:wakeup');
 
 
     const jobId = jobIns.insertId;
@@ -1639,6 +1640,148 @@ if (!terminalId) {
 
 ;
 
+// ---------------------- CARD REFUND VIA AGENT (POS) ----------------------
+router.post('/:id/refunds/card-agent', async (req, res) => {
+  try {
+    const reservationId = Number(req.params.id);
+    if (!reservationId) {
+      return res.status(400).json({ error: 'reservationId invalid' });
+    }
+
+    const employeeId = Number(req.body?.employeeId || req.user?.id || 0) || null;
+    const terminalId = Number(req.user?.terminal_id);
+    if (!terminalId) {
+      return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
+    }
+    if (await rejectIfActiveAgentJob(req, res)) return;
+
+    const paymentRes = await db.query(
+      `SELECT id, amount, status, payment_method, provider_transaction_id
+         FROM payments
+        WHERE reservation_id = ?
+          AND payment_method = 'card'
+          AND status IN ('paid','pos_ok_waiting_receipt')
+        ORDER BY id DESC
+        LIMIT 1`,
+      [reservationId]
+    );
+    const paymentRows = Array.isArray(paymentRes)
+      ? (Array.isArray(paymentRes[0]) ? paymentRes[0] : paymentRes)
+      : paymentRes?.rows;
+
+    const payment = paymentRows?.[0] || null;
+    if (!payment) {
+      return res.status(409).json({ error: 'Nu există o plată cu cardul finalizată pentru această rezervare.' });
+    }
+    if (payment.status === 'refunded') {
+      return res.status(409).json({ error: 'Plata este deja refundată.' });
+    }
+
+    const existingRefunds = await db.query(
+      `SELECT id, status FROM payment_refunds WHERE payment_id = ? AND status IN ('pending','succeeded') LIMIT 1`,
+      [payment.id]
+    );
+    const existingRows = Array.isArray(existingRefunds)
+      ? (Array.isArray(existingRefunds[0]) ? existingRefunds[0] : existingRefunds)
+      : existingRefunds?.rows;
+
+    if (existingRows?.length) {
+      return res.status(409).json({ error: 'Există deja un refund pentru această plată.' });
+    }
+
+    const posMeta = safeJson(payment.provider_transaction_id || '');
+    const posUniqueId = posMeta?.unique_id || payment.provider_transaction_id || null;
+    if (!posUniqueId) {
+      return res.status(409).json({ error: 'Lipsesc datele POS necesare pentru refund.' });
+    }
+
+    const posStanRaw = posMeta?.tags?.A109 ?? null; // STAN / Receipt number
+    const posStan = posStanRaw != null ? String(posStanRaw).trim() : null;
+    if (!posStan || !/^\d{6}$/.test(posStan)) {
+      return res.status(409).json({
+        error: 'Lipseste STAN (A109) pentru refund/void. Nu se poate face refund pe POS fara STAN.',
+      });
+    }
+
+    const opRow = await db.query(
+      `SELECT rs.operator_id
+         FROM reservations r
+         JOIN trips t ON t.id = r.trip_id
+         JOIN route_schedules rs ON rs.id = t.route_schedule_id
+        WHERE r.id = ?
+        LIMIT 1`,
+      [reservationId]
+    );
+    const opId = Number(
+      (Array.isArray(opRow) ? (Array.isArray(opRow[0]) ? opRow[0] : opRow) : opRow?.rows)?.[0]?.operator_id || 0
+    );
+    if (!opId) {
+      return res.status(409).json({ error: 'Nu am putut determina operatorul cursei' });
+    }
+
+    const dev = devForOperatorId(opId);
+    const amount = Number(payment.amount || 0);
+    if (!(amount > 0)) {
+      return res.status(409).json({ error: 'Suma refund-ului nu este validă.' });
+    }
+
+    const refundIns = await db.query(
+      `INSERT INTO payment_refunds
+         (payment_id, amount, currency, status, provider, provider_transaction_id, provider_payload, reason, requested_by, requested_by_type, created_at)
+       VALUES (?, ?, 'RON', 'pending', 'pos', ?, ?, 'pos_refund', ?, 'employee', NOW())`,
+      [
+        payment.id,
+        amount,
+        String(payment.provider_transaction_id || posUniqueId),
+        JSON.stringify({ pos_meta: posMeta }),
+        employeeId,
+      ]
+    );
+    const refundId = refundIns.insertId;
+
+    const payload = {
+      reservation_id: reservationId,
+      payment_id: payment.id,
+      refund_id: refundId,
+      amount,
+      currency: 'RON',
+      dev,
+      pos_unique_id: posUniqueId,
+      pos_stan: posStan,
+      extra_tags: [],
+    };
+
+    const jobIns = await db.query(
+      `INSERT INTO agent_jobs
+         (reservation_id, payment_id, target_terminal_id, job_type, status, payload)
+       VALUES (?, ?, ?, 'card_refund', 'queued', ?)`,
+      [reservationId, payment.id, terminalId, JSON.stringify(payload)]
+    );
+
+    req.app
+      .get('io')
+      ?.of('/agent')
+      ?.to(`terminal:${terminalId}`)
+      ?.emit('agent:wakeup');
+
+    const jobId = jobIns.insertId;
+
+    return res.json({
+      ok: true,
+      reservationId,
+      payment_id: payment.id,
+      refund_id: refundId,
+      job_id: jobId,
+      status: 'pending',
+    });
+  } catch (err) {
+    console.error('[POST /api/reservations/:id/refunds/card-agent]', err);
+    return res.status(500).json({ error: 'Eroare inițiere refund POS (card)' });
+  }
+});
+
+;
+
 
 
 
@@ -1654,9 +1797,9 @@ router.post('/:id/payments/:paymentId/retry-receipt', async (req, res) => {
     }
 
     const terminalId = Number(req.user?.terminal_id);
-if (!terminalId) {
-  return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
-}
+    if (!terminalId) {
+      return res.status(409).json({ error: 'Terminal lipsă în sesiune. Re-login necesar.' });
+    }
     if (await rejectIfActiveAgentJob(req, res)) return;
 
 
@@ -1785,10 +1928,10 @@ if (!terminalId) {
       ]
     );
     req.app
-  .get('io')
-  ?.of('/agent')
-  ?.to(`terminal:${terminalId}`)
-  ?.emit('agent:wakeup');
+      .get('io')
+      ?.of('/agent')
+      ?.to(`terminal:${terminalId}`)
+      ?.emit('agent:wakeup');
 
 
     const jobId =
@@ -2182,6 +2325,16 @@ router.post('/moveToOtherTrip', async (req, res) => {
       [newReservationId, old_reservation_id]
     );
 
+    // 6.ter) mută plățile pe noua rezervare (păstrează starea de plată)
+    await db.query(
+      `
+      UPDATE payments
+      SET reservation_id = ?
+      WHERE reservation_id = ?
+      `,
+      [newReservationId, old_reservation_id]
+    );
+
 
     // 6. log de sinteză "reservation.move" (from -> to)
     await logEvent(newReservationId, 'move', Number(req.user?.id) || null, {
@@ -2365,7 +2518,7 @@ router.get('/double-check-segment', async (req, res) => {
 // POST /api/reservations/move
 router.post('/move', async (req, res) => {
   try {
-        if (await rejectIfActiveAgentJob(req, res)) return;
+    if (await rejectIfActiveAgentJob(req, res)) return;
 
     const {
       reservation_id,     // dacă muți o rezervare existentă
@@ -2516,32 +2669,33 @@ router.get('/:id/payments/status', requireAuth, async (req, res) => {
       [id]
     );
 
-const p = (payments && payments[0]) || null;
+    const p = (payments && payments[0]) || null;
 
-let lastJob = null;
+    let lastJob = null;
 
-if (p && p.payment_id) {
-  const { rows: jobs } = await db.query(
-    `
+    if (p && p.payment_id) {
+      const { rows: jobs } = await db.query(
+        `
     SELECT
       status,
-      error_message
+      error_message,
+      job_type
     FROM agent_jobs
     WHERE payment_id = ?
     ORDER BY id DESC
     LIMIT 1
     `,
-    [p.payment_id]
-  );
+        [p.payment_id]
+      );
 
-  lastJob = (jobs && jobs[0]) || null;
-}
+      lastJob = (jobs && jobs[0]) || null;
+    }
 
-return res.json({
-  ok: true,
-  payment: p,
-  last_job: lastJob,
-});
+    return res.json({
+      ok: true,
+      payment: p,
+      last_job: lastJob,
+    });
 
   } catch (err) {
     console.error('[GET /api/reservations/:id/payments/status]', err);

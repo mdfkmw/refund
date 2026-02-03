@@ -96,6 +96,7 @@ const promoCodesRoutes = require('./routes/promoCodes');
 const authRoutes = require('./routes/auth');
 const invitationsRoutes = require('./routes/invitations');
 const terminalsRoutes = require('./routes/terminals');
+const refundsRoutes = require('./routes/refunds');
 
 const userPrefs = require('./routes/userPrefs');
 const intentsRoutes = require('./routes/intents');
@@ -297,6 +298,7 @@ app.use('/api/online-settings', onlineSettingsRouter);
 app.use('/api/phones', phonesRoutes);
 app.use('/api/traveler-defaults', requireAuth, travelerDefaultsRouter);
 app.use('/api/promo-codes', promoCodesRoutes);
+app.use('/api/refunds', refundsRoutes);
 // Log global (router separat) – doar montare aici, logica este în routes/audit.js
 app.use('/api', require('./routes/audit'));
 app.use('/api/user', userPrefs);
@@ -334,6 +336,5 @@ app.set('io', io);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server backend ascultă pe portul ${PORT}`);
 });
-
 
 
